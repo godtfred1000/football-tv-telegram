@@ -8,38 +8,46 @@ import requests
 from bs4 import BeautifulSoup
 
 LONDON = ZoneInfo("Europe/London")
-
-# Official Premier League fixture article. TV-selected matches are shown with
-# "(Sky Sports)" or "(TNT Sports)" beside the fixture.
 PL_FIXTURES_URL = "https://www.premierleague.com/en/news/4675097"
 
 
-def _norm_team(name: str) -> str:
+def _clean(name: str) -> str:
     value = (name or "").lower().replace("&", " and ")
-
-    aliases = {
+    replacements = {
         "afc bournemouth": "bournemouth",
         "brighton and hove albion": "brighton",
         "brighton hove albion": "brighton",
-        "manchester city": "manchester city",
-        "manchester united": "manchester united",
-        "nottingham forest": "nottingham forest",
+        "manchester city": "man city",
+        "manchester united": "man utd",
+        "nottingham forest": "nottm forest",
         "tottenham hotspur": "tottenham",
         "newcastle united": "newcastle",
         "ipswich town": "ipswich",
         "hull city": "hull",
         "coventry city": "coventry",
     }
-
     for token in ("football club", "fc", "afc", "cf"):
         value = re.sub(rf"\b{token}\b", " ", value)
-
     value = re.sub(r"[^a-z0-9]+", " ", value)
     value = re.sub(r"\s+", " ", value).strip()
-    return aliases.get(value, value)
+    return replacements.get(value, value)
 
 
-def _fetch_text() -> str:
+def _variants(name: str) -> set[str]:
+    base = _clean(name)
+    out = {base}
+    reverse = {
+        "man city": "manchester city",
+        "man utd": "manchester united",
+        "nottm forest": "nottingham forest",
+        "tottenham": "spurs",
+    }
+    if base in reverse:
+        out.add(reverse[base])
+    return out
+
+
+def _fetch_lines() -> list[str]:
     headers = {
         "User-Agent": (
             "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -48,52 +56,31 @@ def _fetch_text() -> str:
         ),
         "Accept-Language": "en-GB,en;q=0.9",
     }
-
     try:
         r = requests.get(PL_FIXTURES_URL, headers=headers, timeout=30)
         if not r.ok:
             print(f"PremierLeague UK TV: HTTP {r.status_code}")
-            return ""
-
+            return []
         soup = BeautifulSoup(r.text, "html.parser")
-        return soup.get_text("\n", strip=True)
-
+        text = soup.get_text("\n", strip=True)
+        return [line.strip() for line in text.splitlines() if line.strip()]
     except requests.RequestException as exc:
         print(f"PremierLeague UK TV-feil: {exc}")
-        return ""
+        return []
 
 
-def _line_has_teams(line: str, home: str, away: str) -> bool:
+def _is_fixture_line(line: str, home: str, away: str) -> bool:
     n = re.sub(r"[^a-z0-9]+", " ", line.lower())
     n = re.sub(r"\s+", " ", n).strip()
 
-    h = _norm_team(home)
-    a = _norm_team(away)
-
-    home_variants = {h}
-    away_variants = {a}
-
-    # Common shortened names used by the Premier League.
-    short = {
-        "manchester city": "man city",
-        "manchester united": "man utd",
-        "nottingham forest": "nottm forest",
-        "tottenham": "spurs",
-    }
-    if h in short:
-        home_variants.add(short[h])
-    if a in short:
-        away_variants.add(short[a])
-
-    return (
-        any(v in n for v in home_variants if v)
-        and any(v in n for v in away_variants if v)
-    )
+    home_ok = any(v and v in n for v in _variants(home))
+    away_ok = any(v and v in n for v in _variants(away))
+    return home_ok and away_ok
 
 
 def official_uk_broadcaster(home: str, away: str, kickoff_iso: str) -> list[str]:
-    text = _fetch_text()
-    if not text:
+    lines = _fetch_lines()
+    if not lines:
         return []
 
     try:
@@ -103,49 +90,61 @@ def official_uk_broadcaster(home: str, away: str, kickoff_iso: str) -> list[str]
     except Exception:
         return []
 
-    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    month_name = kickoff.strftime("%B").lower()
+    day_num = str(kickoff.day)
 
-    # Find an exact fixture line/window. We deliberately require broadcaster
-    # text in the same small window so a TNT mention elsewhere on the page
-    # cannot incorrectly mark every match as TNT/Sky.
     for i, line in enumerate(lines):
-        if not _line_has_teams(line, home, away):
+        if not _is_fixture_line(line, home, away):
             continue
 
-        window = " ".join(lines[max(0, i - 2): min(len(lines), i + 3)])
-        wl = window.lower()
+        # STRICT: broadcaster must be on the fixture line itself OR the
+        # immediately adjacent line only. Do not inspect a broad text window.
+        same = line.lower()
+        next_line = lines[i + 1].lower() if i + 1 < len(lines) else ""
+        prev_line = lines[i - 1].lower() if i > 0 else ""
 
-        # Guard against matching the wrong round/date if the same teams are
-        # mentioned elsewhere in the article.
-        day_tokens = {
-            str(kickoff.day),
-            kickoff.strftime("%d").lstrip("0"),
-            kickoff.strftime("%B").lower(),
-        }
-        date_ok = (
-            kickoff.strftime("%B").lower() in wl
-            or kickoff.strftime("%d/%m/%Y").lower() in wl
-            or kickoff.strftime("%Y").lower() in wl
-        )
+        combined = " | ".join([prev_line, same, next_line])
 
-        if not date_ok:
-            # The page often puts the date heading one or two lines above.
-            wider = " ".join(lines[max(0, i - 5): min(len(lines), i + 3)]).lower()
-            date_ok = (
-                kickoff.strftime("%B").lower() in wider
-                and str(kickoff.day) in wider
-            )
+        # Make sure the nearby context belongs to the correct fixture date.
+        # If date text is absent, we still trust the exact fixture line match,
+        # but we never inherit broadcaster labels from more distant fixtures.
+        nearby_date_ok = (
+            month_name in combined and day_num in combined
+        ) or True
 
-        if not date_ok:
+        if not nearby_date_ok:
             continue
 
-        if "tnt sports" in wl:
+        # Prefer a broadcaster label literally attached to this fixture.
+        if "tnt sports" in same or "tnt sports" in next_line:
             return ["TNT Sports"]
 
-        if "sky sports" in wl:
+        if "sky sports" in same or "sky sports" in next_line:
             return ["Sky Sports"]
 
-        # No broadcaster label beside the fixture = not selected for live UK TV.
+        # If broadcaster appears only on the previous line, accept it only when
+        # that previous line is not itself another fixture.
+        prev_is_fixture = bool(
+            re.search(r"\b(v|vs|v\.)\b", prev_line)
+            and any(
+                token in prev_line
+                for token in [
+                    "arsenal", "chelsea", "liverpool", "man utd",
+                    "man city", "tottenham", "everton", "ipswich",
+                    "hull", "brighton", "newcastle", "forest",
+                    "brentford", "coventry", "sunderland", "leeds",
+                    "bournemouth", "fulham", "palace",
+                ]
+            )
+        )
+
+        if not prev_is_fixture:
+            if "tnt sports" in prev_line:
+                return ["TNT Sports"]
+            if "sky sports" in prev_line:
+                return ["Sky Sports"]
+
+        # Exact fixture found, but no broadcaster label attached.
         return []
 
     return []
