@@ -10,6 +10,7 @@ import requests
 
 from .config import FOOTBALL_DATA_API_TOKEN
 from .tv_livesoccertv import get_broadcasts
+from .tv_uk import official_uk_broadcaster
 
 OSLO = ZoneInfo("Europe/Oslo")
 FD_BASE = "https://api.football-data.org/v4"
@@ -55,46 +56,36 @@ def _football_data_get(path: str, params: dict | None = None) -> dict:
     return data
 
 
-def _clean_uk_channels(channels: list[str]) -> list[str]:
-    normalized = []
-
-    # If any Sky access product appears, show the main brand only.
+def _clean_uk_fallback(channels: list[str]) -> list[str]:
+    out = []
     if any(
         any(token in ch.lower() for token in ["sky sports", "sky go", "now"])
         for ch in channels
     ):
-        normalized.append("Sky Sports")
-
-    # Keep TNT Sports as broadcaster brand.
+        out.append("Sky Sports")
     if any("tnt sports" in ch.lower() for ch in channels):
-        normalized.append("TNT Sports")
-
-    # Prime Video is its own broadcaster/platform.
-    if any(
-        any(token in ch.lower() for token in ["prime video", "amazon prime"])
-        for ch in channels
-    ):
-        normalized.append("Prime Video")
-
-    # BBC / ITV can appear for specific cup or free-to-air coverage.
-    if any("bbc" in ch.lower() for ch in channels):
-        normalized.append("BBC")
-    if any("itv" in ch.lower() for ch in channels):
-        normalized.append("ITV")
-
-    return normalized
+        out.append("TNT Sports")
+    return out
 
 
-def _apply_premier_league_rights(broadcasts: dict[str, list[str]]) -> dict[str, list[str]]:
-    # Official Premier League territory rights for 2025/26-2027/28.
-    # Viaplay holds Norway, Sweden and Denmark; Stan Sport holds Australia.
+def _apply_premier_league_rights(
+    home: str,
+    away: str,
+    kickoff: str,
+    broadcasts: dict[str, list[str]],
+) -> dict[str, list[str]]:
+    # Territory-wide Premier League rights.
     broadcasts["NO"] = ["Viaplay"]
     broadcasts["SE"] = ["Viaplay"]
     broadcasts["DK"] = ["Viaplay"]
     broadcasts["AU"] = ["Stan Sport"]
 
-    # UK is still match-by-match, so only clean whatever LiveSoccerTV found.
-    broadcasts["UK"] = _clean_uk_channels(broadcasts.get("UK") or [])
+    # UK: use official broadcaster schedules first.
+    official = official_uk_broadcaster(home, away, kickoff)
+    if official:
+        broadcasts["UK"] = official
+    else:
+        broadcasts["UK"] = _clean_uk_fallback(broadcasts.get("UK") or [])
 
     return broadcasts
 
@@ -125,7 +116,9 @@ def _load_competition_matches(
         broadcasts = get_broadcasts(home, away, kickoff)
 
         if competition_code == "PL":
-            broadcasts = _apply_premier_league_rights(broadcasts)
+            broadcasts = _apply_premier_league_rights(
+                home, away, kickoff, broadcasts
+            )
 
         rows.append({
             "competition": competition_name,
@@ -136,7 +129,7 @@ def _load_competition_matches(
             "football_data_match_id": match.get("id"),
         })
 
-        time.sleep(0.4)
+        time.sleep(0.35)
 
     return rows
 
