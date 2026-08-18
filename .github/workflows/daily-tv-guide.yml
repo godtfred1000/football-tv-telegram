@@ -1,1 +1,46 @@
+name: Daily football TV guide
 
+on:
+  workflow_dispatch:
+    inputs:
+      demo:
+        description: "Send demo-data"
+        required: false
+        type: boolean
+        default: false
+  schedule:
+    # Kjør begge UTC-tidene. Python-scriptet sender bare når klokken er 09 i Europe/Oslo.
+    # Dermed fungerer det gjennom både CET og CEST.
+    - cron: "5 7 * * *"
+    - cron: "5 8 * * *"
+
+jobs:
+  post:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Post TV guide
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHANNEL: ${{ secrets.TELEGRAM_CHANNEL }}
+          FOOTBALL_TV_FEED_URL: ${{ secrets.FOOTBALL_TV_FEED_URL }}
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.demo }}" = "true" ]; then
+            python bot.py --demo
+          elif [ "${{ github.event_name }}" = "schedule" ]; then
+            python bot.py --scheduled
+          else
+            python bot.py
+          fi
