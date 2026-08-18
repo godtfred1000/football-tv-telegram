@@ -9,8 +9,6 @@ on:
         type: boolean
         default: false
   schedule:
-    # Kjør begge UTC-tidene. Python-scriptet sender bare når klokken er 09 i Europe/Oslo.
-    # Dermed fungerer det gjennom både CET og CEST.
     - cron: "5 7 * * *"
     - cron: "5 8 * * *"
 
@@ -35,6 +33,7 @@ jobs:
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHANNEL: ${{ secrets.TELEGRAM_CHANNEL }}
+          SPORTMONKS_API_TOKEN: ${{ secrets.SPORTMONKS_API_TOKEN }}
           FOOTBALL_TV_FEED_URL: ${{ secrets.FOOTBALL_TV_FEED_URL }}
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.demo }}" = "true" ]; then
