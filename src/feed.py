@@ -20,6 +20,23 @@ COMPETITIONS = {
     "CL": "UEFA Champions League",
 }
 
+UCL_STAGES = {
+    "PRELIMINARY_ROUND",
+    "QUALIFICATION",
+    "QUALIFICATION_ROUND_1",
+    "QUALIFICATION_ROUND_2",
+    "QUALIFICATION_ROUND_3",
+    "PLAYOFF_ROUND_1",
+    "PLAYOFF_ROUND_2",
+    "PLAYOFFS",
+    "LEAGUE_STAGE",
+    "GROUP_STAGE",
+    "LAST_16",
+    "QUARTER_FINALS",
+    "SEMI_FINALS",
+    "FINAL",
+}
+
 
 class FeedError(RuntimeError):
     pass
@@ -56,44 +73,39 @@ def _football_data_get(path: str, params: dict | None = None) -> dict:
     return data
 
 
-def _apply_premier_league_rights(
-    home: str,
-    away: str,
-    kickoff: str,
-    broadcasts: dict[str, list[str]],
-) -> dict[str, list[str]]:
-    # Territory-wide Premier League rights.
-    broadcasts["NO"] = ["Viaplay"]
-    broadcasts["SE"] = ["Viaplay"]
-    broadcasts["DK"] = ["Viaplay"]
-    broadcasts["AU"] = ["Stan Sport"]
-
-    # UK must ONLY use the official Premier League/Sky/TNT fixture selection.
-    # If official_uk_broadcaster returns [], the match is not selected for live UK TV.
-    # Do NOT fall back to LiveSoccerTV for UK, because that can pick up generic
-    # Sky Go/NOW text from nearby fixtures and falsely mark 15:00 matches as Sky.
-    broadcasts["UK"] = official_uk_broadcaster(home, away, kickoff)
-
-    return broadcasts
-
-
 def _load_competition_matches(
     competition_code: str,
     competition_name: str,
     date_from: str,
     date_to: str,
 ) -> list[dict]:
+    params = {
+        "dateFrom": date_from,
+        "dateTo": date_to,
+    }
+
+    # Important for Champions League:
+    # do not restrict to SCHEDULED/TIMED in the API call. Qualification and
+    # playoff fixtures can use different stages/statuses and we want all of them.
+    if competition_code == "PL":
+        params["status"] = "SCHEDULED,TIMED"
+
     data = _football_data_get(
         f"/competitions/{competition_code}/matches",
-        {
-            "dateFrom": date_from,
-            "dateTo": date_to,
-            "status": "SCHEDULED,TIMED",
-        },
+        params,
     )
 
     rows = []
     for match in data.get("matches") or []:
+        if competition_code == "CL":
+            stage = str(match.get("stage") or "").upper()
+            if stage and stage not in UCL_STAGES:
+                continue
+
+            status = str(match.get("status") or "").upper()
+            if status in {"CANCELLED", "POSTPONED"}:
+                continue
+
         home = (match.get("homeTeam") or {}).get("name") or "Hjemmelag"
         away = (match.get("awayTeam") or {}).get("name") or "Bortelag"
         kickoff = match.get("utcDate")
@@ -103,9 +115,11 @@ def _load_competition_matches(
         broadcasts = get_broadcasts(home, away, kickoff)
 
         if competition_code == "PL":
-            broadcasts = _apply_premier_league_rights(
-                home, away, kickoff, broadcasts
-            )
+            broadcasts["NO"] = ["Viaplay"]
+            broadcasts["SE"] = ["Viaplay"]
+            broadcasts["DK"] = ["Viaplay"]
+            broadcasts["AU"] = ["Stan Sport"]
+            broadcasts["UK"] = official_uk_broadcaster(home, away, kickoff)
 
         rows.append({
             "competition": competition_name,
@@ -114,6 +128,8 @@ def _load_competition_matches(
             "away": away,
             "broadcasts": broadcasts,
             "football_data_match_id": match.get("id"),
+            "stage": match.get("stage"),
+            "status": match.get("status"),
         })
 
         time.sleep(0.35)
