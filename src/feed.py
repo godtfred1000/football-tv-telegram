@@ -11,6 +11,7 @@ import requests
 from .config import FOOTBALL_DATA_API_TOKEN
 from .tv_livesoccertv import get_broadcasts
 from .tv_uk import official_uk_broadcaster
+from .uefa_cl import get_uefa_matches
 
 OSLO = ZoneInfo("Europe/Oslo")
 FD_BASE = "https://api.football-data.org/v4"
@@ -18,23 +19,6 @@ FD_BASE = "https://api.football-data.org/v4"
 COMPETITIONS = {
     "PL": "Premier League",
     "CL": "UEFA Champions League",
-}
-
-UCL_STAGES = {
-    "PRELIMINARY_ROUND",
-    "QUALIFICATION",
-    "QUALIFICATION_ROUND_1",
-    "QUALIFICATION_ROUND_2",
-    "QUALIFICATION_ROUND_3",
-    "PLAYOFF_ROUND_1",
-    "PLAYOFF_ROUND_2",
-    "PLAYOFFS",
-    "LEAGUE_STAGE",
-    "GROUP_STAGE",
-    "LAST_16",
-    "QUARTER_FINALS",
-    "SEMI_FINALS",
-    "FINAL",
 }
 
 
@@ -73,6 +57,14 @@ def _football_data_get(path: str, params: dict | None = None) -> dict:
     return data
 
 
+def _norm_team(value: str) -> str:
+    import re
+    value = (value or "").lower().replace("&", " and ")
+    value = re.sub(r"\b(fc|afc|cf|fk|sk|sc)\b", " ", value)
+    value = re.sub(r"[^a-z0-9]+", " ", value)
+    return re.sub(r"\s+", " ", value).strip()
+
+
 def _load_competition_matches(
     competition_code: str,
     competition_name: str,
@@ -84,9 +76,6 @@ def _load_competition_matches(
         "dateTo": date_to,
     }
 
-    # Important for Champions League:
-    # do not restrict to SCHEDULED/TIMED in the API call. Qualification and
-    # playoff fixtures can use different stages/statuses and we want all of them.
     if competition_code == "PL":
         params["status"] = "SCHEDULED,TIMED"
 
@@ -97,14 +86,9 @@ def _load_competition_matches(
 
     rows = []
     for match in data.get("matches") or []:
-        if competition_code == "CL":
-            stage = str(match.get("stage") or "").upper()
-            if stage and stage not in UCL_STAGES:
-                continue
-
-            status = str(match.get("status") or "").upper()
-            if status in {"CANCELLED", "POSTPONED"}:
-                continue
+        status = str(match.get("status") or "").upper()
+        if status in {"CANCELLED", "POSTPONED"}:
+            continue
 
         home = (match.get("homeTeam") or {}).get("name") or "Hjemmelag"
         away = (match.get("awayTeam") or {}).get("name") or "Bortelag"
@@ -128,13 +112,46 @@ def _load_competition_matches(
             "away": away,
             "broadcasts": broadcasts,
             "football_data_match_id": match.get("id"),
-            "stage": match.get("stage"),
-            "status": match.get("status"),
+            "source": "football-data.org",
         })
 
-        time.sleep(0.35)
+        time.sleep(0.30)
 
     return rows
+
+
+def _merge_cl_fallback(existing: list[dict], start, end) -> list[dict]:
+    uefa = get_uefa_matches(start, end)
+
+    keys = set()
+    for m in existing:
+        try:
+            d = datetime.fromisoformat(
+                m["kickoff"].replace("Z", "+00:00")
+            ).astimezone(OSLO).date().isoformat()
+        except Exception:
+            continue
+        keys.add((d, _norm_team(m["home"]), _norm_team(m["away"])))
+
+    for m in uefa:
+        try:
+            d = datetime.fromisoformat(
+                m["kickoff"].replace("Z", "+00:00")
+            ).astimezone(OSLO).date().isoformat()
+        except Exception:
+            continue
+
+        key = (d, _norm_team(m["home"]), _norm_team(m["away"]))
+        if key in keys:
+            continue
+
+        # Reuse our TV parser for UEFA fallback matches.
+        m["broadcasts"] = get_broadcasts(m["home"], m["away"], m["kickoff"])
+        existing.append(m)
+        keys.add(key)
+        time.sleep(0.30)
+
+    return existing
 
 
 def load_football_data_feed(days: int = 1) -> dict:
@@ -151,6 +168,9 @@ def load_football_data_feed(days: int = 1) -> dict:
                 end.isoformat(),
             )
         )
+
+    # UEFA fallback fills qualifying/play-off fixtures missing from football-data.org.
+    matches = _merge_cl_fallback(matches, start, end)
 
     matches.sort(key=lambda m: m["kickoff"])
     return {"matches": matches}
