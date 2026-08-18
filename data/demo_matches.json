@@ -1,0 +1,30 @@
+{
+  "matches": [
+    {
+      "competition": "UEFA Champions League",
+      "kickoff": "2026-08-18T21:00:00+02:00",
+      "home": "Real Madrid",
+      "away": "Liverpool",
+      "broadcasts": {
+        "NO": ["TV 2 Play", "TV 2 Sport"],
+        "SE": ["Viaplay", "V Sport"],
+        "DK": ["Viaplay"],
+        "AU": ["Stan Sport"],
+        "UK": ["TNT Sports"]
+      }
+    },
+    {
+      "competition": "Premier League",
+      "kickoff": "2026-08-18T18:30:00+02:00",
+      "home": "Arsenal",
+      "away": "Chelsea",
+      "broadcasts": {
+        "NO": ["Viaplay"],
+        "SE": ["Viaplay"],
+        "DK": ["Viaplay"],
+        "AU": ["Stan Sport"],
+        "UK": ["Sky Sports"]
+      }
+    }
+  ]
+}
