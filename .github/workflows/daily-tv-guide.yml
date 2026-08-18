@@ -8,6 +8,14 @@ on:
         required: false
         type: boolean
         default: false
+      days:
+        description: "Antall dager å teste"
+        required: false
+        type: choice
+        options:
+          - "1"
+          - "7"
+        default: "1"
   schedule:
     - cron: "5 7 * * *"
     - cron: "5 8 * * *"
@@ -16,6 +24,7 @@ jobs:
   post:
     runs-on: ubuntu-latest
     timeout-minutes: 5
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -38,8 +47,10 @@ jobs:
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.demo }}" = "true" ]; then
             python bot.py --demo
+          elif [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            python bot.py --days "${{ inputs.days }}"
           elif [ "${{ github.event_name }}" = "schedule" ]; then
-            python bot.py --scheduled
+            python bot.py --scheduled --days 1
           else
-            python bot.py
+            python bot.py --days 1
           fi
