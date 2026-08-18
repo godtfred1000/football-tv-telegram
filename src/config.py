@@ -3,6 +3,7 @@ import os
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 CHANNEL = os.getenv("TELEGRAM_CHANNEL", "").strip()
 FEED_URL = os.getenv("FOOTBALL_TV_FEED_URL", "").strip()
+SPORTMONKS_API_TOKEN = os.getenv("SPORTMONKS_API_TOKEN", "").strip()
 
 COUNTRIES = {
     "NO": ("🇳🇴", "Norge"),
