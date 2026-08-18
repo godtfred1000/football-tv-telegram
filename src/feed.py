@@ -11,7 +11,7 @@ import requests
 from .config import FOOTBALL_DATA_API_TOKEN
 from .tv_livesoccertv import get_broadcasts
 from .tv_uk import official_uk_broadcaster
-from .uefa_cl import get_uefa_matches
+from .thesportsdb_cl import get_thesportsdb_cl_matches
 
 OSLO = ZoneInfo("Europe/Oslo")
 FD_BASE = "https://api.football-data.org/v4"
@@ -59,9 +59,11 @@ def _football_data_get(path: str, params: dict | None = None) -> dict:
 
 def _norm_team(value: str) -> str:
     import re
+
     value = (value or "").lower().replace("&", " and ")
     value = re.sub(r"\b(fc|afc|cf|fk|sk|sc)\b", " ", value)
     value = re.sub(r"[^a-z0-9]+", " ", value)
+
     return re.sub(r"\s+", " ", value).strip()
 
 
@@ -71,6 +73,7 @@ def _load_competition_matches(
     date_from: str,
     date_to: str,
 ) -> list[dict]:
+
     params = {
         "dateFrom": date_from,
         "dateTo": date_to,
@@ -85,14 +88,17 @@ def _load_competition_matches(
     )
 
     rows = []
+
     for match in data.get("matches") or []:
         status = str(match.get("status") or "").upper()
+
         if status in {"CANCELLED", "POSTPONED"}:
             continue
 
         home = (match.get("homeTeam") or {}).get("name") or "Hjemmelag"
         away = (match.get("awayTeam") or {}).get("name") or "Bortelag"
         kickoff = match.get("utcDate")
+
         if not kickoff:
             continue
 
@@ -103,7 +109,11 @@ def _load_competition_matches(
             broadcasts["SE"] = ["Viaplay"]
             broadcasts["DK"] = ["Viaplay"]
             broadcasts["AU"] = ["Stan Sport"]
-            broadcasts["UK"] = official_uk_broadcaster(home, away, kickoff)
+            broadcasts["UK"] = official_uk_broadcaster(
+                home,
+                away,
+                kickoff,
+            )
 
         rows.append({
             "competition": competition_name,
@@ -120,10 +130,16 @@ def _load_competition_matches(
     return rows
 
 
-def _merge_cl_fallback(existing: list[dict], start, end) -> list[dict]:
-    uefa = get_uefa_matches(start, end)
+def _merge_cl_fallback(
+    existing: list[dict],
+    start,
+    end,
+) -> list[dict]:
+
+    extra = get_thesportsdb_cl_matches(start, end)
 
     keys = set()
+
     for m in existing:
         try:
             d = datetime.fromisoformat(
@@ -131,9 +147,14 @@ def _merge_cl_fallback(existing: list[dict], start, end) -> list[dict]:
             ).astimezone(OSLO).date().isoformat()
         except Exception:
             continue
-        keys.add((d, _norm_team(m["home"]), _norm_team(m["away"])))
 
-    for m in uefa:
+        keys.add((
+            d,
+            _norm_team(m["home"]),
+            _norm_team(m["away"]),
+        ))
+
+    for m in extra:
         try:
             d = datetime.fromisoformat(
                 m["kickoff"].replace("Z", "+00:00")
@@ -141,24 +162,43 @@ def _merge_cl_fallback(existing: list[dict], start, end) -> list[dict]:
         except Exception:
             continue
 
-        key = (d, _norm_team(m["home"]), _norm_team(m["away"]))
+        key = (
+            d,
+            _norm_team(m["home"]),
+            _norm_team(m["away"]),
+        )
+
         if key in keys:
             continue
 
-        # Reuse our TV parser for UEFA fallback matches.
-        m["broadcasts"] = get_broadcasts(m["home"], m["away"], m["kickoff"])
+        # Try TV data, but do not let it prevent the CL match from appearing.
+        try:
+            m["broadcasts"] = get_broadcasts(
+                m["home"],
+                m["away"],
+                m["kickoff"],
+            )
+        except Exception as exc:
+            print(
+                "TV-oppslag feilet for TheSportsDB-kamp "
+                f"{m['home']} – {m['away']}: {exc}"
+            )
+
         existing.append(m)
         keys.add(key)
-        time.sleep(0.30)
+
+        time.sleep(0.20)
 
     return existing
 
 
 def load_football_data_feed(days: int = 1) -> dict:
+
     start = datetime.now(OSLO).date()
     end = start + timedelta(days=max(days, 1) - 1)
 
     matches = []
+
     for code, name in COMPETITIONS.items():
         matches.extend(
             _load_competition_matches(
@@ -169,16 +209,31 @@ def load_football_data_feed(days: int = 1) -> dict:
             )
         )
 
-    # UEFA fallback fills qualifying/play-off fixtures missing from football-data.org.
-    matches = _merge_cl_fallback(matches, start, end)
+    # TheSportsDB fills Champions League qualifying/play-off fixtures
+    # that football-data.org does not return.
+    matches = _merge_cl_fallback(
+        matches,
+        start,
+        end,
+    )
 
     matches.sort(key=lambda m: m["kickoff"])
-    return {"matches": matches}
+
+    return {
+        "matches": matches,
+    }
 
 
-def load_feed(demo: bool = False, days: int = 1) -> dict:
+def load_feed(
+    demo: bool = False,
+    days: int = 1,
+) -> dict:
+
     if demo:
         return json.loads(
-            Path("data/demo_matches.json").read_text(encoding="utf-8")
+            Path("data/demo_matches.json").read_text(
+                encoding="utf-8",
+            )
         )
+
     return load_football_data_feed(days=days)
