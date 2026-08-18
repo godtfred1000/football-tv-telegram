@@ -1,215 +1,261 @@
 from __future__ import annotations
 
 import json
+import re
+import time
 from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import requests
 
-from .config import FEED_URL, SPORTMONKS_API_TOKEN
+from .config import FOOTBALL_DATA_API_TOKEN, THESPORTSDB_API_KEY
 
 OSLO = ZoneInfo("Europe/Oslo")
-UTC = ZoneInfo("UTC")
-BASE = "https://api.sportmonks.com/v3/football"
 
-ALIASES = {
-    "NO": {"NO", "NOR", "NORWAY", "NORG"},
-    "SE": {"SE", "SWE", "SWEDEN", "SVERIGE"},
-    "DK": {"DK", "DNK", "DENMARK", "DANMARK"},
-    "AU": {"AU", "AUS", "AUSTRALIA"},
-    "UK": {
-        "GB", "GBR", "UK", "UNITED KINGDOM", "GREAT BRITAIN",
-        "ENGLAND", "SCOTLAND", "WALES", "NORTHERN IRELAND"
-    },
+FD_BASE = "https://api.football-data.org/v4"
+TSDB_BASE = "https://www.thesportsdb.com/api/v1/json"
+
+COMPETITIONS = {
+    "PL": "Premier League",
+    "CL": "UEFA Champions League",
 }
 
-class SportMonksError(RuntimeError):
+COUNTRY_MAP = {
+    "norway": "NO",
+    "norge": "NO",
+    "sweden": "SE",
+    "sverige": "SE",
+    "denmark": "DK",
+    "danmark": "DK",
+    "australia": "AU",
+    "united kingdom": "UK",
+    "uk": "UK",
+    "england": "UK",
+    "great britain": "UK",
+}
+
+
+class FeedError(RuntimeError):
     pass
 
-def _get(url: str, params: dict) -> dict:
-    r = requests.get(url, params=params, timeout=30)
+
+def _football_data_get(path: str, params: dict | None = None) -> dict:
+    if not FOOTBALL_DATA_API_TOKEN:
+        raise FeedError("FOOTBALL_DATA_API_TOKEN mangler i GitHub Secrets.")
+
+    r = requests.get(
+        f"{FD_BASE}{path}",
+        headers={"X-Auth-Token": FOOTBALL_DATA_API_TOKEN},
+        params=params or {},
+        timeout=30,
+    )
+
+    if r.status_code == 401:
+        raise FeedError("football-data.org avviste API-tokenet (401).")
+    if r.status_code == 403:
+        raise FeedError("football-data.org ga 403. Sjekk at Free-planen har tilgang til konkurransen.")
+    if r.status_code == 429:
+        raise FeedError("football-data.org rate limit er nådd (429).")
+
     try:
         data = r.json()
     except ValueError:
         data = {}
 
-    if r.status_code == 401:
-        raise SportMonksError("SportMonks avviste API-tokenet (401).")
-    if r.status_code == 403:
-        raise SportMonksError("SportMonks ga 403. Planen din har trolig ikke tilgang til ligaen eller TV-dataene.")
-    if r.status_code == 429:
-        raise SportMonksError("SportMonks rate limit er nådd (429).")
     if not r.ok:
-        raise SportMonksError(
-            f"SportMonks-feil {r.status_code}: {data.get('message') or r.text[:300]}"
+        raise FeedError(
+            f"football-data.org-feil {r.status_code}: "
+            f"{data.get('message') or r.text[:300]}"
         )
+
     return data
 
-def _all_pages(url: str, params: dict) -> list[dict]:
-    rows, page = [], 1
-    while True:
-        p = dict(params)
-        p["page"] = page
-        data = _get(url, p)
-        rows.extend(data.get("data") or [])
-        if not (data.get("pagination") or {}).get("has_more"):
-            break
-        page += 1
-        if page > 10:
-            break
-    return rows
 
-def _competition(name: str) -> str | None:
-    n = (name or "").lower().strip()
-    if "champions league" in n and "women" not in n and "youth" not in n:
-        return "UEFA Champions League"
-    if "premier league" in n and "women" not in n:
-        return "Premier League"
+def _tsdb_get(endpoint: str, params: dict | None = None) -> dict:
+    r = requests.get(
+        f"{TSDB_BASE}/{THESPORTSDB_API_KEY}/{endpoint}",
+        params=params or {},
+        timeout=25,
+    )
+    if not r.ok:
+        raise FeedError(f"TheSportsDB-feil {r.status_code}: {r.text[:250]}")
+    try:
+        return r.json()
+    except ValueError:
+        return {}
+
+
+def _clean_team_name(name: str) -> str:
+    value = (name or "").strip()
+
+    replacements = [
+        (r"\bFC\b", ""),
+        (r"\bAFC\b", ""),
+        (r"\bCF\b", ""),
+        (r"\bAC\b", ""),
+        (r"\bSC\b", ""),
+        (r"\bFK\b", ""),
+    ]
+    for pattern, repl in replacements:
+        value = re.sub(pattern, repl, value, flags=re.IGNORECASE)
+
+    value = re.sub(r"\s+", " ", value).strip()
+    return value
+
+
+def _slug(value: str) -> str:
+    value = _clean_team_name(value)
+    value = value.replace("&", "and")
+    value = re.sub(r"[^\w\s-]", "", value, flags=re.UNICODE)
+    value = re.sub(r"[\s-]+", "_", value).strip("_")
+    return value
+
+
+def _norm(value: str) -> str:
+    value = _clean_team_name(value).lower()
+    value = value.replace("&", "and")
+    value = re.sub(r"[^a-z0-9]+", "", value)
+    return value
+
+
+def _event_matches_teams(event: dict, home: str, away: str) -> bool:
+    event_name = event.get("strEvent") or ""
+    if "_vs_" in event_name:
+        left, right = event_name.split("_vs_", 1)
+    elif " vs " in event_name.lower():
+        parts = re.split(r"\s+vs\s+", event_name, maxsplit=1, flags=re.IGNORECASE)
+        if len(parts) != 2:
+            return False
+        left, right = parts
+    else:
+        left = event.get("strHomeTeam") or ""
+        right = event.get("strAwayTeam") or ""
+
+    h = _norm(home)
+    a = _norm(away)
+    l = _norm(left)
+    r = _norm(right)
+
+    return (h == l and a == r) or (h == r and a == l)
+
+
+def _find_tsdb_event_id(home: str, away: str, date_iso: str) -> str | None:
+    query = f"{_slug(home)}_vs_{_slug(away)}"
+    data = _tsdb_get(
+        "searchevents.php",
+        {"e": query, "d": date_iso},
+    )
+    events = data.get("event") or data.get("events") or []
+
+    for event in events:
+        if _event_matches_teams(event, home, away):
+            return str(event.get("idEvent") or "") or None
+
+    # Noen kilder bruker motsatt rekkefølge i eventnavnet.
+    query = f"{_slug(away)}_vs_{_slug(home)}"
+    data = _tsdb_get(
+        "searchevents.php",
+        {"e": query, "d": date_iso},
+    )
+    events = data.get("event") or data.get("events") or []
+
+    for event in events:
+        if _event_matches_teams(event, home, away):
+            return str(event.get("idEvent") or "") or None
+
     return None
 
-def _teams(fixture: dict) -> tuple[str, str]:
-    participants = fixture.get("participants") or []
-    home = away = None
-    unknown = []
 
-    for team in participants:
-        name = team.get("name") or "Ukjent lag"
-        meta = team.get("meta") or {}
-        side = str(meta.get("location") or meta.get("position") or "").lower()
-        if side in {"home", "local"}:
-            home = name
-        elif side in {"away", "visitor"}:
-            away = name
-        else:
-            unknown.append(name)
-
-    if home is None and unknown:
-        home = unknown.pop(0)
-    if away is None and unknown:
-        away = unknown.pop(0)
-
-    if home and away:
-        return home, away
-
-    fixture_name = fixture.get("name") or ""
-    if " vs " in fixture_name:
-        left, right = fixture_name.split(" vs ", 1)
-        return left.strip(), right.strip()
-
-    return home or "Hjemmelag", away or "Bortelag"
-
-def _kickoff(fixture: dict) -> str:
-    raw = str(fixture.get("starting_at") or "").replace("Z", "+00:00")
-    if not raw:
-        raise SportMonksError("En kamp mangler starting_at.")
-    dt = datetime.fromisoformat(raw)
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=UTC)
-    return dt.astimezone(UTC).isoformat()
-
-def _country_tokens(country: dict) -> set[str]:
-    out = set()
-    for key in ("name", "iso2", "iso3", "iso_code", "code"):
-        value = country.get(key)
-        if value:
-            out.add(str(value).upper().strip())
-    return out
-
-def _station_country_codes(station: dict) -> set[str]:
-    countries = station.get("countries") or []
-    if isinstance(countries, dict):
-        countries = countries.get("data") or []
-
-    tokens = set()
-    for country in countries:
-        if isinstance(country, dict):
-            tokens |= _country_tokens(country)
-
-    result = set()
-    for code, aliases in ALIASES.items():
-        if tokens & aliases:
-            result.add(code)
-    return result
-
-def _tv_stations_for_fixture(fixture_id: int) -> list[dict]:
-    return _all_pages(
-        f"{BASE}/tv-stations/fixtures/{fixture_id}",
-        {
-            "api_token": SPORTMONKS_API_TOKEN,
-            "include": "countries",
-            "per_page": 100,
-        },
-    )
-
-def _broadcasts_for_fixture(fixture_id: int) -> dict[str, list[str]]:
+def _broadcasts_from_tsdb(event_id: str | None) -> dict[str, list[str]]:
     result = {"NO": [], "SE": [], "DK": [], "AU": [], "UK": []}
 
-    for station in _tv_stations_for_fixture(fixture_id):
-        if not isinstance(station, dict):
+    if not event_id:
+        return result
+
+    data = _tsdb_get("lookuptv.php", {"id": event_id})
+    rows = data.get("tvevent") or []
+
+    for row in rows:
+        country = str(row.get("strCountry") or "").strip().lower()
+        channel = str(row.get("strChannel") or "").strip()
+
+        code = COUNTRY_MAP.get(country)
+        if not code or not channel:
             continue
 
-        name = station.get("name")
-        if not name:
-            continue
-
-        for code in _station_country_codes(station):
-            if name not in result[code]:
-                result[code].append(name)
+        if channel not in result[code]:
+            result[code].append(channel)
 
     return result
 
-def _fixture_rows(start_date: str, end_date: str | None = None) -> list[dict]:
-    if end_date:
-        url = f"{BASE}/fixtures/between/{start_date}/{end_date}"
-    else:
-        url = f"{BASE}/fixtures/date/{start_date}"
 
-    return _all_pages(
-        url,
+def _load_competition_matches(
+    competition_code: str,
+    competition_name: str,
+    date_from: str,
+    date_to: str,
+) -> list[dict]:
+    data = _football_data_get(
+        f"/competitions/{competition_code}/matches",
         {
-            "api_token": SPORTMONKS_API_TOKEN,
-            "include": "participants;league",
-            "per_page": 50,
-            "order": "asc",
+            "dateFrom": date_from,
+            "dateTo": date_to,
+            "status": "SCHEDULED,TIMED",
         },
     )
 
-def load_sportmonks_feed(days: int = 1) -> dict:
-    if not SPORTMONKS_API_TOKEN:
-        raise SportMonksError("SPORTMONKS_API_TOKEN mangler i GitHub Secrets.")
+    rows = []
+    for match in data.get("matches") or []:
+        home = (match.get("homeTeam") or {}).get("name") or "Hjemmelag"
+        away = (match.get("awayTeam") or {}).get("name") or "Bortelag"
+        kickoff = match.get("utcDate")
 
+        if not kickoff:
+            continue
+
+        oslo_dt = datetime.fromisoformat(kickoff.replace("Z", "+00:00")).astimezone(OSLO)
+        date_iso = oslo_dt.date().isoformat()
+
+        event_id = _find_tsdb_event_id(home, away, date_iso)
+        broadcasts = _broadcasts_from_tsdb(event_id)
+
+        rows.append(
+            {
+                "competition": competition_name,
+                "kickoff": kickoff,
+                "home": home,
+                "away": away,
+                "broadcasts": broadcasts,
+                "football_data_match_id": match.get("id"),
+                "thesportsdb_event_id": event_id,
+            }
+        )
+
+        # Hold oss godt under gratisgrensene.
+        time.sleep(0.15)
+
+    return rows
+
+
+def load_football_data_feed(days: int = 1) -> dict:
     start = datetime.now(OSLO).date()
     end = start + timedelta(days=max(days, 1) - 1)
 
-    fixtures = _fixture_rows(
-        start.isoformat(),
-        end.isoformat() if days > 1 else None
-    )
-
     matches = []
-    for fixture in fixtures:
-        league_name = (fixture.get("league") or {}).get("name") or ""
-        competition = _competition(league_name)
-        if not competition:
-            continue
+    for code, name in COMPETITIONS.items():
+        matches.extend(
+            _load_competition_matches(
+                code,
+                name,
+                start.isoformat(),
+                end.isoformat(),
+            )
+        )
 
-        fixture_id = fixture.get("id")
-        if not fixture_id:
-            continue
-
-        home, away = _teams(fixture)
-
-        matches.append({
-            "competition": competition,
-            "kickoff": _kickoff(fixture),
-            "home": home,
-            "away": away,
-            "broadcasts": _broadcasts_for_fixture(fixture_id),
-            "sportmonks_fixture_id": fixture_id,
-        })
-
+    matches.sort(key=lambda m: m["kickoff"])
     return {"matches": matches}
+
 
 def load_feed(demo: bool = False, days: int = 1) -> dict:
     if demo:
@@ -217,9 +263,4 @@ def load_feed(demo: bool = False, days: int = 1) -> dict:
             Path("data/demo_matches.json").read_text(encoding="utf-8")
         )
 
-    if FEED_URL:
-        r = requests.get(FEED_URL, timeout=25)
-        r.raise_for_status()
-        return r.json()
-
-    return load_sportmonks_feed(days=days)
+    return load_football_data_feed(days=days)
