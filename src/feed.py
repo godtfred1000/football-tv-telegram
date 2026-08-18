@@ -10,6 +10,7 @@ import requests
 
 from .config import FOOTBALL_DATA_API_TOKEN
 from .tv_livesoccertv import get_broadcasts
+from .tv_viaplay_no import premier_league_on_viaplay
 
 OSLO = ZoneInfo("Europe/Oslo")
 FD_BASE = "https://api.football-data.org/v4"
@@ -80,6 +81,12 @@ def _load_competition_matches(
 
         broadcasts = get_broadcasts(home, away, kickoff)
 
+        # Official Norway fallback: if LiveSoccerTV has no Norwegian listing,
+        # verify the match on Viaplay Norway's Premier League page.
+        if competition_code == "PL" and not broadcasts.get("NO"):
+            if premier_league_on_viaplay(home, away):
+                broadcasts["NO"] = ["Viaplay"]
+
         rows.append({
             "competition": competition_name,
             "kickoff": kickoff,
@@ -89,7 +96,6 @@ def _load_competition_matches(
             "football_data_match_id": match.get("id"),
         })
 
-        # Be polite to LiveSoccerTV.
         time.sleep(0.4)
 
     return rows
