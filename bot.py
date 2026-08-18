@@ -6,42 +6,45 @@ from zoneinfo import ZoneInfo
 
 from src.config import BOT_TOKEN, CHANNEL
 from src.feed import load_feed
-from src.formatter import format_daily_message, matches_for_day
-from src.telegram_client import send_message
+from src.formatter import build_message
+from src.telegram import send_message
 
 OSLO = ZoneInfo("Europe/Oslo")
 
 
-def main() -> None:
+def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--demo", action="store_true", help="Bruk demo-kamper")
-    parser.add_argument("--print-only", action="store_true", help="Skriv meldingen uten å sende")
-    parser.add_argument(
-        "--scheduled",
-        action="store_true",
-        help="Kjør bare når klokken er 09 i Europe/Oslo (brukes av GitHub Actions)",
-    )
-    args = parser.parse_args()
+    parser.add_argument("--demo", action="store_true")
+    parser.add_argument("--scheduled", action="store_true")
+    parser.add_argument("--days", type=int, default=1)
+    return parser.parse_args()
 
-    now = datetime.now(OSLO)
-    if args.scheduled and now.hour != 9:
-        print(f"Ikke 09:xx i Norge ({now:%H:%M}). Hopper over.")
+
+def main():
+    args = parse_args()
+
+    if args.scheduled and datetime.now(OSLO).hour != 9:
+        print("Ikke 09:xx i Europe/Oslo – hopper over denne cron-kjøringen.")
         return
 
-    feed = load_feed(demo=args.demo)
-    matches = matches_for_day(feed)
-    text = format_daily_message(matches, demo=args.demo)
+    if not BOT_TOKEN:
+        raise RuntimeError("TELEGRAM_BOT_TOKEN mangler.")
+    if not CHANNEL:
+        raise RuntimeError("TELEGRAM_CHANNEL mangler.")
 
-    if not text:
-        print("Ingen Champions League- eller Premier League-kamper i dag.")
+    feed = load_feed(demo=args.demo, days=args.days)
+    matches = feed.get("matches") or []
+
+    if not matches:
+        if args.days > 1:
+            print(f"Ingen Champions League- eller Premier League-kamper de neste {args.days} dagene.")
+        else:
+            print("Ingen Champions League- eller Premier League-kamper i dag.")
         return
 
-    if args.print_only:
-        print(text)
-        return
-
-    send_message(BOT_TOKEN, CHANNEL, text)
-    print(f"Sendt {len(matches)} kamp(er) til {CHANNEL}.")
+    message = build_message(feed, demo=args.demo)
+    send_message(BOT_TOKEN, CHANNEL, message)
+    print(f"Sendte {len(matches)} kamp(er) til Telegram.")
 
 
 if __name__ == "__main__":
