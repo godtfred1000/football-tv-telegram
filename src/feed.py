@@ -56,18 +56,6 @@ def _football_data_get(path: str, params: dict | None = None) -> dict:
     return data
 
 
-def _clean_uk_fallback(channels: list[str]) -> list[str]:
-    out = []
-    if any(
-        any(token in ch.lower() for token in ["sky sports", "sky go", "now"])
-        for ch in channels
-    ):
-        out.append("Sky Sports")
-    if any("tnt sports" in ch.lower() for ch in channels):
-        out.append("TNT Sports")
-    return out
-
-
 def _apply_premier_league_rights(
     home: str,
     away: str,
@@ -80,12 +68,11 @@ def _apply_premier_league_rights(
     broadcasts["DK"] = ["Viaplay"]
     broadcasts["AU"] = ["Stan Sport"]
 
-    # UK: use official broadcaster schedules first.
-    official = official_uk_broadcaster(home, away, kickoff)
-    if official:
-        broadcasts["UK"] = official
-    else:
-        broadcasts["UK"] = _clean_uk_fallback(broadcasts.get("UK") or [])
+    # UK must ONLY use the official Premier League/Sky/TNT fixture selection.
+    # If official_uk_broadcaster returns [], the match is not selected for live UK TV.
+    # Do NOT fall back to LiveSoccerTV for UK, because that can pick up generic
+    # Sky Go/NOW text from nearby fixtures and falsely mark 15:00 matches as Sky.
+    broadcasts["UK"] = official_uk_broadcaster(home, away, kickoff)
 
     return broadcasts
 
