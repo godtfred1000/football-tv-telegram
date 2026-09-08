@@ -19,9 +19,6 @@ on:
         default: "1"
   schedule:
     - cron: "5 7 * * *"
-  push:
-    branches:
-      - main
 
 jobs:
   post:
