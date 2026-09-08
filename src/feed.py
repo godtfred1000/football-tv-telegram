@@ -51,12 +51,35 @@ def _match_day(m):
     except Exception:
         return None
 
+def _clean_broadcasters(items):
+    """Remove exact and obvious alias duplicates while preserving useful services."""
+    out=[]
+    seen=set()
+    for item in items or []:
+        name=re.sub(r"\s+"," ",str(item)).strip()
+        if not name:
+            continue
+        key=name.casefold()
+        # Prime Video and Amazon Prime Video are the same service; keep the clearer name.
+        if key in {"prime video", "amazon prime video"}:
+            key="amazon prime video"
+            name="Amazon Prime Video"
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(name)
+    return out
+
+def _clean_broadcast_map(b):
+    return {code:_clean_broadcasters((b or {}).get(code,[]) or []) for code in TV_COUNTRIES}
+
 def _merge_broadcasts(primary, secondary):
-    primary={code:list((primary or {}).get(code,[]) or []) for code in TV_COUNTRIES}
+    primary=_clean_broadcast_map(primary)
+    secondary=_clean_broadcast_map(secondary)
     for code in TV_COUNTRIES:
         if not primary[code]:
-            primary[code]=list((secondary or {}).get(code,[]) or [])
-    return primary
+            primary[code]=secondary[code]
+    return _clean_broadcast_map(primary)
 
 def _tv_for_cl(home,away,kickoff):
     try:
@@ -65,14 +88,14 @@ def _tv_for_cl(home,away,kickoff):
         print("FotMob TV-feil:",exc)
         b={code:[] for code in TV_COUNTRIES}
 
-    b={code:list((b or {}).get(code,[]) or []) for code in TV_COUNTRIES}
+    b=_clean_broadcast_map(b)
 
     try:
         tvk=get_tvkampen_norway(home,away)
         if tvk:
-            b["NO"]=tvk
+            b["NO"]=_clean_broadcasters(tvk)
         elif not b.get("NO"):
-            b["NO"]=champions_league_norway_fallback()
+            b["NO"]=_clean_broadcasters(champions_league_norway_fallback())
     except Exception as exc:
         print("TVkampen NO-feil:",exc)
 
@@ -85,7 +108,12 @@ def _tv_for_cl(home,away,kickoff):
         except Exception as exc:
             print("LiveSoccerTV fallback-feil:",exc)
 
-    return b
+    # Stan Sport har de australske Champions League-rettighetene. Enkelte
+    # datakilder utelater Australia, så fyll inn Stan Sport når AU mangler.
+    if not b.get("AU"):
+        b["AU"]=["Stan Sport"]
+
+    return _clean_broadcast_map(b)
 
 def _load_competition_matches(code,name,date_from,date_to):
     params={"dateFrom":date_from,"dateTo":date_to}
@@ -100,6 +128,7 @@ def _load_competition_matches(code,name,date_from,date_to):
         if not kickoff: continue
         if code=="PL":
             broadcasts={"NO":["Viaplay"],"SE":["Viaplay"],"DK":["Viaplay"],"AU":["Stan Sport"],"UK":official_uk_broadcaster(home,away,kickoff)}
+            broadcasts=_clean_broadcast_map(broadcasts)
         else:
             broadcasts=_tv_for_cl(home,away,kickoff)
         rows.append({"competition":name,"kickoff":kickoff,"home":home,"away":away,"venue":None,"broadcasts":broadcasts,"football_data_match_id":match.get("id"),"source":"football-data.org"})
@@ -119,10 +148,6 @@ def _merge_cl_fallback(existing,start,end):
                 break
 
         if duplicate is not None:
-            # Samme kamp kan ha forskjellige lagnavn i datakildene, f.eks.
-            # "Lille OSC" / "Lille" og "Real Betis Balompié" / "Real Betis".
-            # Bruk fallback-kilden til å fylle manglende TV-data og stadion,
-            # men behold kampen som én oppføring.
             fallback_tv=_tv_for_cl(m["home"],m["away"],m["kickoff"])
             duplicate["broadcasts"]=_merge_broadcasts(duplicate.get("broadcasts"),fallback_tv)
             if not duplicate.get("venue") and m.get("venue"):
