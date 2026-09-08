@@ -19,7 +19,6 @@ on:
         default: "1"
   schedule:
     - cron: "5 7 * * *"
-    - cron: "5 8 * * *"
 
 jobs:
   post:
@@ -50,7 +49,7 @@ jobs:
           elif [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             python bot.py --days "${{ inputs.days }}"
           elif [ "${{ github.event_name }}" = "schedule" ]; then
-            python bot.py --scheduled --days 1
+            python bot.py --days 1
           else
             python bot.py --days 1
           fi
