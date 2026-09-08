@@ -52,55 +52,53 @@ def _match_day(m):
         return None
 
 def _clean_broadcasters(items):
-    """Remove exact and obvious alias duplicates while preserving useful services."""
-    out=[]
-    seen=set()
+    out=[]; seen=set()
     for item in items or []:
         name=re.sub(r"\s+"," ",str(item)).strip()
-        if not name:
-            continue
+        if not name: continue
         key=name.casefold()
-        # Prime Video and Amazon Prime Video are the same service; keep the clearer name.
-        if key in {"prime video", "amazon prime video"}:
-            key="amazon prime video"
-            name="Amazon Prime Video"
-        if key in seen:
-            continue
-        seen.add(key)
-        out.append(name)
+        if key in {"prime video", "amazon prime video", "prime video (uk)"}:
+            key="amazon prime video"; name="Amazon Prime Video"
+        if key in seen: continue
+        seen.add(key); out.append(name)
     return out
 
 def _clean_broadcast_map(b):
     return {code:_clean_broadcasters((b or {}).get(code,[]) or []) for code in TV_COUNTRIES}
 
 def _merge_broadcasts(primary, secondary):
-    primary=_clean_broadcast_map(primary)
-    secondary=_clean_broadcast_map(secondary)
+    primary=_clean_broadcast_map(primary); secondary=_clean_broadcast_map(secondary)
     for code in TV_COUNTRIES:
-        if not primary[code]:
-            primary[code]=secondary[code]
+        if not primary[code]: primary[code]=secondary[code]
     return _clean_broadcast_map(primary)
+
+def _clean_cl_uk(items):
+    """Show the actual UK UCL broadcaster, not platform/streaming aliases."""
+    names=_clean_broadcasters(items)
+    low=" | ".join(names).casefold()
+    if "tnt" in low:
+        return ["TNT Sports"]
+    if "amazon prime" in low or "prime video" in low:
+        return ["Amazon Prime Video"]
+    # BBC has highlights rights only, and NOW/HBO Max are platform listings,
+    # so do not present them as the match broadcaster.
+    return []
 
 def _tv_for_cl(home,away,kickoff):
     try:
         b=get_fotmob_broadcasts(home,away,kickoff)
     except Exception as exc:
-        print("FotMob TV-feil:",exc)
-        b={code:[] for code in TV_COUNTRIES}
-
+        print("FotMob TV-feil:",exc); b={code:[] for code in TV_COUNTRIES}
     b=_clean_broadcast_map(b)
+    fotmob_uk=_clean_cl_uk(b.get("UK"))
 
     try:
         tvk=get_tvkampen_norway(home,away)
-        if tvk:
-            b["NO"]=_clean_broadcasters(tvk)
-        elif not b.get("NO"):
-            b["NO"]=_clean_broadcasters(champions_league_norway_fallback())
+        if tvk: b["NO"]=_clean_broadcasters(tvk)
+        elif not b.get("NO"): b["NO"]=_clean_broadcasters(champions_league_norway_fallback())
     except Exception as exc:
         print("TVkampen NO-feil:",exc)
 
-    # FotMob har ofte bare enkelte land. Hent derfor alltid en ekstra kilde
-    # når minst ett av landene mangler, og fyll kun inn de tomme feltene.
     if not all(b.get(code) for code in TV_COUNTRIES):
         try:
             extra=get_livesoccertv_broadcasts(home,away,kickoff)
@@ -108,18 +106,17 @@ def _tv_for_cl(home,away,kickoff):
         except Exception as exc:
             print("LiveSoccerTV fallback-feil:",exc)
 
-    # Stan Sport har de australske Champions League-rettighetene. Enkelte
-    # datakilder utelater Australia, så fyll inn Stan Sport når AU mangler.
-    if not b.get("AU"):
-        b["AU"]=["Stan Sport"]
+    if not b.get("AU"): b["AU"]=["Stan Sport"]
 
+    # Prefer match-specific FotMob UK data. If it has none, use the fallback
+    # only to distinguish TNT Sports from an Amazon Prime selection.
+    b["UK"]=fotmob_uk or _clean_cl_uk(b.get("UK")) or ["TNT Sports"]
     return _clean_broadcast_map(b)
 
 def _load_competition_matches(code,name,date_from,date_to):
     params={"dateFrom":date_from,"dateTo":date_to}
     if code=="PL": params["status"]="SCHEDULED,TIMED"
-    data=_football_data_get(f"/competitions/{code}/matches",params)
-    rows=[]
+    data=_football_data_get(f"/competitions/{code}/matches",params); rows=[]
     for match in data.get("matches") or []:
         if str(match.get("status") or "").upper() in {"CANCELLED","POSTPONED"}: continue
         home=(match.get("homeTeam") or {}).get("name") or "Hjemmelag"
@@ -129,8 +126,7 @@ def _load_competition_matches(code,name,date_from,date_to):
         if code=="PL":
             broadcasts={"NO":["Viaplay"],"SE":["Viaplay"],"DK":["Viaplay"],"AU":["Stan Sport"],"UK":official_uk_broadcaster(home,away,kickoff)}
             broadcasts=_clean_broadcast_map(broadcasts)
-        else:
-            broadcasts=_tv_for_cl(home,away,kickoff)
+        else: broadcasts=_tv_for_cl(home,away,kickoff)
         rows.append({"competition":name,"kickoff":kickoff,"home":home,"away":away,"venue":None,"broadcasts":broadcasts,"football_data_match_id":match.get("id"),"source":"football-data.org"})
         time.sleep(0.1)
     return rows
@@ -138,33 +134,23 @@ def _load_competition_matches(code,name,date_from,date_to):
 def _merge_cl_fallback(existing,start,end):
     extra=get_thesportsdb_cl_matches(start,end)
     for m in extra:
-        day=_match_day(m)
-        duplicate=None
+        day=_match_day(m); duplicate=None
         for current in existing:
-            if _match_day(current)!=day:
-                continue
+            if _match_day(current)!=day: continue
             if _team_similar(current.get("home"),m.get("home")) and _team_similar(current.get("away"),m.get("away")):
-                duplicate=current
-                break
-
+                duplicate=current; break
         if duplicate is not None:
             fallback_tv=_tv_for_cl(m["home"],m["away"],m["kickoff"])
             duplicate["broadcasts"]=_merge_broadcasts(duplicate.get("broadcasts"),fallback_tv)
-            if not duplicate.get("venue") and m.get("venue"):
-                duplicate["venue"]=m["venue"]
+            if not duplicate.get("venue") and m.get("venue"): duplicate["venue"]=m["venue"]
             continue
-
-        m["broadcasts"]=_tv_for_cl(m["home"],m["away"],m["kickoff"])
-        existing.append(m)
-        time.sleep(0.1)
+        m["broadcasts"]=_tv_for_cl(m["home"],m["away"],m["kickoff"]); existing.append(m); time.sleep(0.1)
     return existing
 
 def load_football_data_feed(days=1):
     start=datetime.now(OSLO).date(); end=start+timedelta(days=max(days,1)-1); matches=[]
-    for code,name in COMPETITIONS.items():
-        matches.extend(_load_competition_matches(code,name,start.isoformat(),end.isoformat()))
-    matches=_merge_cl_fallback(matches,start,end)
-    matches.sort(key=lambda m:m["kickoff"])
+    for code,name in COMPETITIONS.items(): matches.extend(_load_competition_matches(code,name,start.isoformat(),end.isoformat()))
+    matches=_merge_cl_fallback(matches,start,end); matches.sort(key=lambda m:m["kickoff"])
     return {"matches":matches}
 
 def load_feed(demo=False,days=1):
