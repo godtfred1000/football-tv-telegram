@@ -14,6 +14,7 @@ from .thesportsdb_cl import get_thesportsdb_cl_matches
 OSLO=ZoneInfo("Europe/Oslo")
 FD_BASE="https://api.football-data.org/v4"
 COMPETITIONS={"PL":"Premier League","CL":"UEFA Champions League"}
+TV_COUNTRIES=("NO","SE","DK","AU","UK")
 
 class FeedError(RuntimeError): pass
 
@@ -34,21 +35,57 @@ def _norm_team(v):
     v=re.sub(r"[^a-z0-9]+"," ",v)
     return re.sub(r"\s+"," ",v).strip()
 
-def _has_tv(b): return any(bool(v) for v in b.values())
+def _team_similar(a,b):
+    a=_norm_team(a); b=_norm_team(b)
+    if not a or not b: return False
+    if a==b: return True
+    if min(len(a),len(b))>=4 and (a in b or b in a): return True
+    ta=set(a.split()); tb=set(b.split())
+    if not ta or not tb: return False
+    overlap=len(ta & tb)
+    return overlap >= 2 and overlap / min(len(ta),len(tb)) >= 0.67
+
+def _match_day(m):
+    try:
+        return datetime.fromisoformat(m["kickoff"].replace("Z","+00:00")).astimezone(OSLO).date()
+    except Exception:
+        return None
+
+def _merge_broadcasts(primary, secondary):
+    primary={code:list((primary or {}).get(code,[]) or []) for code in TV_COUNTRIES}
+    for code in TV_COUNTRIES:
+        if not primary[code]:
+            primary[code]=list((secondary or {}).get(code,[]) or [])
+    return primary
 
 def _tv_for_cl(home,away,kickoff):
-    try: b=get_fotmob_broadcasts(home,away,kickoff)
+    try:
+        b=get_fotmob_broadcasts(home,away,kickoff)
     except Exception as exc:
-        print("FotMob TV-feil:",exc); b={"NO":[],"SE":[],"DK":[],"AU":[],"UK":[]}
+        print("FotMob TV-feil:",exc)
+        b={code:[] for code in TV_COUNTRIES}
+
+    b={code:list((b or {}).get(code,[]) or []) for code in TV_COUNTRIES}
+
     try:
         tvk=get_tvkampen_norway(home,away)
-        if tvk: b["NO"]=tvk
-        elif not b.get("NO"): b["NO"]=champions_league_norway_fallback()
-    except Exception as exc: print("TVkampen NO-feil:",exc)
-    if _has_tv(b): return b
-    try: return get_livesoccertv_broadcasts(home,away,kickoff)
+        if tvk:
+            b["NO"]=tvk
+        elif not b.get("NO"):
+            b["NO"]=champions_league_norway_fallback()
     except Exception as exc:
-        print("LiveSoccerTV fallback-feil:",exc); return b
+        print("TVkampen NO-feil:",exc)
+
+    # FotMob har ofte bare enkelte land. Hent derfor alltid en ekstra kilde
+    # når minst ett av landene mangler, og fyll kun inn de tomme feltene.
+    if not all(b.get(code) for code in TV_COUNTRIES):
+        try:
+            extra=get_livesoccertv_broadcasts(home,away,kickoff)
+            b=_merge_broadcasts(b,extra)
+        except Exception as exc:
+            print("LiveSoccerTV fallback-feil:",exc)
+
+    return b
 
 def _load_competition_matches(code,name,date_from,date_to):
     params={"dateFrom":date_from,"dateTo":date_to}
@@ -70,18 +107,31 @@ def _load_competition_matches(code,name,date_from,date_to):
     return rows
 
 def _merge_cl_fallback(existing,start,end):
-    extra=get_thesportsdb_cl_matches(start,end); keys=set()
-    for m in existing:
-        try: d=datetime.fromisoformat(m["kickoff"].replace("Z","+00:00")).astimezone(OSLO).date().isoformat()
-        except Exception: continue
-        keys.add((d,_norm_team(m["home"]),_norm_team(m["away"])))
+    extra=get_thesportsdb_cl_matches(start,end)
     for m in extra:
-        try: d=datetime.fromisoformat(m["kickoff"].replace("Z","+00:00")).astimezone(OSLO).date().isoformat()
-        except Exception: continue
-        key=(d,_norm_team(m["home"]),_norm_team(m["away"]))
-        if key in keys: continue
+        day=_match_day(m)
+        duplicate=None
+        for current in existing:
+            if _match_day(current)!=day:
+                continue
+            if _team_similar(current.get("home"),m.get("home")) and _team_similar(current.get("away"),m.get("away")):
+                duplicate=current
+                break
+
+        if duplicate is not None:
+            # Samme kamp kan ha forskjellige lagnavn i datakildene, f.eks.
+            # "Lille OSC" / "Lille" og "Real Betis Balompié" / "Real Betis".
+            # Bruk fallback-kilden til å fylle manglende TV-data og stadion,
+            # men behold kampen som én oppføring.
+            fallback_tv=_tv_for_cl(m["home"],m["away"],m["kickoff"])
+            duplicate["broadcasts"]=_merge_broadcasts(duplicate.get("broadcasts"),fallback_tv)
+            if not duplicate.get("venue") and m.get("venue"):
+                duplicate["venue"]=m["venue"]
+            continue
+
         m["broadcasts"]=_tv_for_cl(m["home"],m["away"],m["kickoff"])
-        existing.append(m); keys.add(key); time.sleep(0.1)
+        existing.append(m)
+        time.sleep(0.1)
     return existing
 
 def load_football_data_feed(days=1):
